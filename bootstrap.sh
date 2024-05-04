@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+apt install -y autoconf
+apt install -y libtool
+apt install -y automake
+apt install -y libgmp-dev
+apt install -y libmpfr-dev
+apt install -y libqd-dev
+apt install -y pkg-config
+
 jobs="-j 4 "
 if [ "$1" = "-j" ]; then
    jobs="-j $2 "
