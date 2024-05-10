@@ -1,24 +1,25 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import random
-import math
 import time
 import logging
-import os 
+import os
+import multiprocessing
 import resource
 from random import randint
-from fpylll import IntegerMatrix
+from math import sqrt, ceil, pi, sin, cos, exp, log, log2
 from g6k import Siever, SieverParams
 from g6k.algorithms.bkz import pump_n_jump_bkz_tour as bkz
 from g6k.utils.stats import dummy_tracer
-from math import sqrt, ceil, pi, sin, cos, exp
+from fpylll import IntegerMatrix, BKZ
 from fpylll.util import gaussian_heuristic
+from fpylll.algorithms.bkz2 import BKZReduction
 from itertools import product
 from datetime import datetime
 
+
 # Matzov - column notation, g6k - row notation 
 
-n = 45
+n = 55
 m = 40
 q = 1489
 p = 5
@@ -28,8 +29,13 @@ k_fft = 4
 k_lat = n - k_enum - k_fft
 
 Beta1 = 35
-Beta2 = 35
-D = 65
+Beta2 = 45
+D = 129
+
+# sieving parameters
+saturation_radius = 1.33
+saturation_ratio = 0.95
+db_size_factor = 5
 '''
 n = 30
 m = 30
@@ -44,7 +50,8 @@ Beta1 = 25
 Beta2 = 25
 D = 33
 '''
-threads = 6
+threads = max(1, multiprocessing.cpu_count())
+print(f"Threads: {threads}")
 LWEalpha = 0.015
 #sigma = q * LWEalpha
 
@@ -80,25 +87,30 @@ s: m x 1, e: 1 x n
 MATZOV (column notation): m x n, m - number of samples, n - number of coefficients
 s: 1 x n , e: m x 1
 '''
-def gamma_beta(beta):
-    return pow(((beta / (2 * math.pi * math.e)) * pow((math.pi * beta), 1. / beta) ), 1. / (beta - 1.))
+
+def print_memory_usage():
+    """
+    Print the memory usage of the current process.
+    """
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    memory_mb = usage.ru_maxrss / 1024  # 1 KB = 1024 B
+    print("Memory usage (MB):", memory_mb)
 
 def asympthotic_D(l_avgs):
     sigma = 1
     mi_values = np.arange(0.05, 1, 0.05)
     D_estimates = []
-    #l_sigma = pow(sigma, (m / (m + k_lat))) * pow((sigma * q), (k_lat / (m + k_lat))) * sqrt(4/3) * sqrt(Beta2 / (2 * math.pi * math.e)) * pow(gamma_beta(Beta1), (m + k_lat - Beta2) / 2)
     for l_avg in range(len(l_avgs)):
         D_estimate = []
         for mi in mi_values:
-            D_est = (k_enum * entropy_B2 + k_fft * math.log(p) + math.log(1./mi)) * \
-                math.exp((k_fft / 3) * pow((sigma * math.pi) / p, 2)) * \
-                math.exp((4 * pow(((l_avg * sigma * math.pi) / q),2)))   
+            D_est = (k_enum * entropy_B2 + k_fft * log(p) + log(1./mi)) * \
+                exp((k_fft / 3) * pow((sigma * pi) / p, 2)) * \
+                exp((4 * pow(((l_avg * sigma * pi) / q),2)))   
             D_estimate.append(D_est)
         D_estimates.append(D_estimate)
 
     D_estimates = np.mean(D_estimates, axis=0)
-    # Tworzenie wykresu
+
     plt.figure(figsize=(10, 6))  # Set the figure size
     plt.plot(mi_values, D_estimates, marker='o')
     plt.title(f'Estimated required number of samples by probability of failure\n(Average form all trials)')
@@ -109,16 +121,24 @@ def asympthotic_D(l_avgs):
     plt.savefig(folder_path + f"D_estimate_{n}_{m}_{q}" + '.png')
 
 def entropy(probabilities):
+    """
+    Calculate the entropy value based on the given probabilities.
+
+    :param probabilities: A dictionary containing probabilities.
+
+    :return: float: The entropy value calculated from the given probabilities.
+
+    This function calculates the entropy value using the given probabilities. It iterates through the values
+    of the probabilities dictionary, computing the entropy contribution for each probability, and then sums up
+    all the entropy contributions. Finally, it returns the negative sum of these entropy contributions.
+    """
     entropy_val = 0
     for prob in probabilities.values():
-        entropy_val += prob * math.log2(prob)
+        entropy_val += prob * log2(prob)
     return -entropy_val
 
-def log2(x):
-    return int(math.log(x) // math.log(2))
-
 def vector_length(vector):
-    return math.sqrt(sum(v_**2 for v_ in vector))
+    return sqrt(sum(v_**2 for v_ in vector))
 
 def binomial(eta):
     """
@@ -133,8 +153,8 @@ def binomial(eta):
     sum_result = 0
 
     for i in range(eta):
-        a = random.randint(0, 1)
-        b = random.randint(0, 1)
+        a = randint(0, 1)
+        b = randint(0, 1)
         sum_result += a - b
 
     return sum_result
@@ -212,102 +232,111 @@ class DiscreteGaussian:
 
 def progressive_sieve_left(g6k):
     r = g6k.r
-    #gh = gaussian_heuristic([g6k.M.get_r(i, i) for i in range(g6k.r - Beta2, g6k.r)])
-    gh = gaussian_heuristic([g6k.M.get_r(i, i) for i in range(r)])
-    print(gh)
-    #print(gaussian_heuristic([g6k.M.get_r(i, i) for i in range(Beta2)]))
     g6k.initialize_local(0, max(0, r - 20), r)
-    print(f"m + k_lat: {m + k_lat}")
-    print(f"r in G6K: {g6k.r}")
-    print(f"l in G6K: {g6k.l}")
     while g6k.r - g6k.l < min(Beta2, 45):
         g6k.extend_left(1)
         g6k("gauss")
-        print(g6k.l)
+        print(f"Gauss sieving with size: {g6k.l}")
         logging.info(f"Gauss sieving with size: {g6k.l}")
 
     while g6k.r - g6k.l < Beta2:
         g6k.extend_left(1)
-        g6k("bgj1")
-        print(g6k.l)
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        memory_mb = usage.ru_maxrss / 1024  # 1 KB = 1024 B
-        print("Memory usage (MB):", memory_mb)
+        g6k("bgj1")      
+        print_memory_usage()
+        print(f"BGJ1 sieving with size: {g6k.l}")
         logging.info(f"BGJ1 sieving with size: {g6k.l}")
-
-    print(f"Sieving with hk3")
-    with g6k.temp_params(saturation_ratio=.9, db_size_factor=3):
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        memory_mb = usage.ru_maxrss / 1024  # 1 KB = 1024 B
-        print("Memory usage (MB):", memory_mb)
+    
+    print("hk3 sieving with size")
+    logging.info("hk3 sieving with size")
+    with g6k.temp_params(saturation_ratio = saturation_ratio, saturation_radius = saturation_radius, db_size_base=sqrt(saturation_radius) ,db_size_factor = db_size_factor):
         g6k(alg="hk3")
 
-    #g6k.resize_db(ceil(.9 * (4 / 3)**((Beta2) / 2)))
+    while g6k.l > 0:
+        # Extend the lift context to the left
+        g6k.extend_left(1)
 
+    g6k.resize_db(ceil(.5 * saturation_ratio *saturation_radius**(Beta2/2.)))
     db = list(g6k.itervalues())
-    database = []
-    
-    print(f"Database size: {len(db)}")
-    logging.info(f"Database size:: {len(db)}")
-
-    for x in db:
-        #v = g6k.M.B[g6k.r - Beta2:].multiply_left(x)
-        v = g6k.M.B[g6k.l: g6k.r].multiply_left(x)
-        #v = g6k.M.B.multiply_left(x)
-        l = sum(v_**2 for v_ in v)                
-        if l < 10 * gh:  
-            database.append(v) 
-            #print((l/gh, v))  
-        
+    database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
     print(f"Final database size: {len(database)}")
     logging.info(f"Final database size:: {len(database)}")
 
     return [w[:m] for w in database] + [[-x for x in w[:m]] for w in database]
-
 
 def progressive_sieve_right(g6k):
 
-    gh = gaussian_heuristic([g6k.M.get_r(i, i) for i in range(Beta2)])
     g6k.initialize_local(0, 0, 0)
-    #saturation_radius = 1.3
-
+    
     while g6k.r < min(Beta2, 45):
         g6k.extend_right(1)
         g6k("gauss")
-        print(g6k.r)
+        g6k("gauss")
+        print(f"Gauss sieving with size: {g6k.r}")
         logging.info(f"Gauss sieving with size: {g6k.r}")
 
     while g6k.r < Beta2:
-        with g6k.temp_params(saturation_ratio=0.001, saturation_radius = 1.3, db_size_factor=10):
+        with g6k.temp_params(saturation_ratio = saturation_ratio, saturation_radius = saturation_radius, db_size_base=sqrt(saturation_radius), db_size_factor=db_size_factor):
             g6k.extend_right(1)
             g6k("bgj1")
-            print(g6k.r)
-            usage = resource.getrusage(resource.RUSAGE_SELF)
-            memory_mb = usage.ru_maxrss / 1024  # 1 KB = 1024 B
-            print("Memory usage (MB):", memory_mb)
+            print_memory_usage()
+            print(f"BGJ1 sieving with size: {g6k.r}")
             logging.info(f"BGJ1 sieving with size: {g6k.r}")
 
+    while g6k.r < m + k_lat:
+        g6k.extend_right(1)
+
+    g6k.resize_db(ceil(.5 * saturation_ratio *saturation_radius**(Beta2/2.)))
     db = list(g6k.itervalues())
-    database = []
-
-    print(f"Database size: {len(db)}")
-    logging.info(f"Database size:: {len(db)}")
-    smaller = 0
-    for x in db:
-        v = g6k.M.B.multiply_left(x)
-        l = sum(v_**2 for v_ in v)                
-        if l < 1.7 * gh:  
-            database.append(v) 
-            #print((l/gh, v))    
-
-    print(f"Smaller: {smaller}")
+    database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
     print(f"Final database size: {len(database)}")
     logging.info(f"Final database size:: {len(database)}")
 
     return [w[:m] for w in database] + [[-x for x in w[:m]] for w in database]
 
-def generate_permutations(eta, n):
+def progressive_BKZ(g6k):
+    """
+    Original code obtained from: github.com/ludopulles/DoesDualSieveWork
+    File: MATZOV.py
+    Author: ludopulles
+    License: MIT 
 
+    Run progressive BKZ up to blocksize beta
+
+    :param B: the IntegerMatrix object on which to perform the lattice
+    reduction.  Note that this function changes B.
+    :param beta: blocksize up to which inclusive to perform progressive BKZ reduction.
+    :param params: The SieverParams with which to instantiate the g6k object.
+    :param verbose: boolean indicating whether or not to output progress of BKZ.
+
+    :returns: Siever object containing the reduced basis.
+    """
+    bkz = BKZReduction(g6k.M)
+
+    # Run BKZ up to blocksize `beta`:
+    for _beta in range(2, Beta1 + 1):
+        bkz(BKZ.Param(_beta, strategies=BKZ.DEFAULT_STRATEGY, max_loops=2))
+
+    return g6k
+
+def generate_permutations(eta, n):
+    """
+    Generate permutations of numbers based on the value of eta and the length of the permutation.
+
+    Parameters:
+        eta (int): Parameter determining the set of numbers used for permutations.
+                   If eta equals 2, numbers range from -2 to 2. Otherwise, numbers range from -3 to 3.
+        n (int): Length of each permutation.
+
+    Returns:
+        numpy.ndarray: An array containing all possible permutations of numbers with their respective probabilities,
+                       sorted in descending order of probability sums.
+
+    Description:
+        This function generates permutations of numbers with repetition based on the value of eta and the length of
+        each permutation. It computes the probability sum for each permutation and sorts them in descending order
+        based on the probability sum. Finally, it returns an array containing all permutations sorted by their
+        probability sums.
+    """
     if eta == 2:
         numbers = [-2, -1, 0, 1, 2]
         probabilities = probabilities_B2
@@ -349,7 +378,7 @@ def mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft,  L, s_tilde_enum, b):
 # row notation
 def generate_LWE_instance(m, n, q):
     """
-    Generate an LWE instance
+    Generate an LWE instance (A, b) and secret s
 
     Parameters:
     - m (int): Number of samples.
@@ -361,8 +390,7 @@ def generate_LWE_instance(m, n, q):
     - b (list): Target matrix of size 1 x m
     - s (list): Secret matrix of size 1 x n
     """
-    # Generate a random q-ary lattice with
-    #B = IntegerMatrix.random(m + n, 'qary', k = m, q = q)
+    # Generate a random q-ary lattice
     B = IntegerMatrix.random(m + n, 'qary', k = m, q = q)
     '''
         print(IntegerMatrix.random(10, "qary", k=8, q=127))
@@ -395,7 +423,7 @@ def generate_LWE_instance(m, n, q):
 
 def create_dual_lattice(A_lat):
     """
-    Create a dual lattice froom lattice A_lat
+    Create a dual lattice from lattice A_lat
 
     Parameters:
     - A_lat (IntegerMatrix): Matrix of size m x k_lat
@@ -416,6 +444,7 @@ def create_dual_lattice(A_lat):
 
 def sampling(B_dual):
     global l_lengths
+
     sieverParams = SieverParams(threads = threads, dual_mode = False)
     g6k = Siever(M = B_dual, params=sieverParams)
     short_vectors = []
@@ -441,59 +470,7 @@ def sampling(B_dual):
     print(f"Average lengh l: {sum(l_length) / len(l_length)}")
     logging.info(f"Vectors used\n: {short_vectors}")
     logging.info(f"Average lengh l: {sum(l_length) / len(l_length)}")
-    #asympthotic_D(sum(l_length) / len(l_length))
     return short_vectors
-
-def dual_attack_full():
-    global k_lat, k_enum, k_fft
-    assert k_enum + k_fft + k_lat == n
-    A, b, s = generate_LWE_instance(m, n, q)
-    s_guess = []
-    
-    while k_lat >= k_enum + k_fft:
-        s_guess.append(dual_attack(A, b, s))
-        A = A[k_enum:]
-        s = s[k_enum:]
-        k_lat -= k_enum
-        k_enum = 1
-
-def dual_attack(A, b, s):
-
-    #Line 1: 
-    A_enum = A[:k_enum]
-    A_fft = A[k_enum: k_enum + k_fft]
-    A_lat = A[k_enum + k_fft:]
-
-    A_enum.transpose()
-    A_fft.transpose()
-    A_lat.transpose()
-
-    #Line 2 : 
-    B_dual = create_dual_lattice(A_lat)
-
-    #Line 3 : 
-    L = sampling(B_dual)
-
-    y_ffts = []
-    y_enums = []
-
-    for i in range(0, len(L)):
-        v = L[i]
-        y_ffts.append(tuple(element % q for element in A_fft.multiply_left(v)))       
-        y_enums.append(tuple(element % q for element in A_enum.multiply_left(v)))
-
-    # Line 4:
-    s_tilde_enums = generate_permutations(2, k_enum)
-    list_max = []
-    probs = []
-    for i in range(len(s_tilde_enums)):
-        _max = mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft, L, s_tilde_enums[i], b)
-        probs.append((_max, s_tilde_enums[i]))
-        list_max.append(_max)
-
-    index = np.argmax(list_max)
-
-    return s_tilde_enums[index]
 
 def dual_attack_test(A, b, s):
 
@@ -519,7 +496,7 @@ def dual_attack_test(A, b, s):
     logging.info(f"Sampling completed, execution time: {execution_time}")
 
     d = len(L)
-    correct = [0] * log2(d)
+    correct = [0] * int(log2(d))
     y_ffts = []
     y_enums = []
     for i in range(0, d):
@@ -530,7 +507,7 @@ def dual_attack_test(A, b, s):
     new_k_enum = k_enum
     # Line 4:
     s_tilde_enums = generate_permutations(eta, new_k_enum)
-    for exponent in range(0, log2(d)):
+    for exponent in range(0, int(log2(d))):
         power_of_two = 2 ** (exponent + 1)
         
         probs = []
@@ -557,33 +534,18 @@ def dual_attack_test(A, b, s):
     return correct
 
 
-def test_single_guess():
-
-    assert k_enum + k_fft + k_lat == n
-    correct = 0
-    trials = 1
-
-    for i in range(0, trials):
-        A, b, s = generate_LWE_instance(m, n, q)
-        s_guess =  dual_attack(A, b, s)
-        print(int(np.array_equal(s_guess, s[:k_enum])))
-        correct += int(np.array_equal(s_guess, s[:k_enum]))
-
-    print("Correct Guesses (%)")
-    print(correct)
-    print(trials)
-    print(correct / trials)
-
 def test_vectors():
     global current_date 
     global folder_path
     global l_lengths 
 
+    # Creating folder for storing the results
     current_date = datetime.now().strftime("%m-%d-%H-%M")
-    folder_path = "d_test/" + f"{current_date}_{n}_{m}/"
+    folder_path = "./d_test/" + f"{current_date}_{n}_{m}/"
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
+    # Creating logging file
     log_name = folder_path + "_logs.txt"
     logging.basicConfig(filename=log_name, level=logging.INFO,
                         format='%(asctime)s: %(message)s', datefmt='%m-%d %H:%M:%S')
@@ -596,40 +558,29 @@ def test_vectors():
     variables['b'] = b
     variables['s'] = s
 
-    
     file_name = f"variables_{n}_{m}.txt"
 
-    # Create the file in the folder
+    # Create the file containg the LWE instance and all the variables
     file_path = os.path.join(folder_path, file_name)
     with open(file_path, 'w') as file:
         for variable, value in variables.items():
             file.write(f'{variable}:{value}\n')
 
-    num_of_trials = 1
+    num_of_trials = 1 # how many times the test should be repreated
     logging.info(f"Number of trials: {num_of_trials}")
-    s_guess = []
+
+    s_guess = [] # An array containg the ranks for each trial
     for _ in range (num_of_trials):
         s_guess.append(dual_attack_test(A, b, s))
 
     s_guess = np.mean(s_guess, axis=0)
     
-    asympthotic_D(l_avgs)
-    # Create a box plot
-    print(l_lengths)
-    temp = len(l_lengths)
+    asympthotic_D(l_avgs) # Calculate the Asymptotic Number of Samples required for the attack (D)
+    # Create a boxplot containg the lengths of the vectors used in the attack (averaged)
     sums = [sum(column) for column in zip(*l_lengths)]
-    averages = [sum_value / temp for sum_value in sums]
-
-    print(log2(len(averages)))
-    # Define the ranges for boxplot series
-    ranges = [2**i for i in range(1, log2(len(averages)) + 1)]
-
-    # Prepare data for boxplots
+    averages = [sum_value / len(l_lengths) for sum_value in sums] 
+    ranges = [2**i for i in range(1, int(log2(len(averages))) + 1)] # Define the ranges for boxplot series
     data = [averages[:r] for r in ranges]
-    print(ranges)
-    print(len(ranges))
-    print(len(averages))
-    # Create boxplot
     plt.figure(figsize=(10, 6))
     plt.boxplot(data)
     plt.xticks(np.arange(1, len(ranges) + 1), [f'2^{i + 1}' for i in range(len(ranges))])
@@ -645,7 +596,6 @@ def test_vectors():
     plot_name = f"D_{n}_{m}"
     x_values = list(range(1, len(s_guess) + 1)) 
     x_labels = [f"2^{x}" for x in x_values]  # Converting to powers of two
-
     plt.figure(figsize=(10, 6))  # Set the figure size
     plt.scatter(x_values, s_guess)
     plt.axhline(0, color='black',linewidth=0.5)
@@ -657,6 +607,4 @@ def test_vectors():
     plt.grid(True)
     plt.savefig(folder_path + plot_name + '.png')
 
-#dual_attack_full()
-#test_single_guess()
 test_vectors()
