@@ -5,7 +5,8 @@ import logging
 import os
 import multiprocessing
 import resource
-from random import randint
+import argparse
+from random import randint, random
 from math import sqrt, ceil, pi, sin, cos, exp, log, log2
 from g6k import Siever, SieverParams
 from g6k.algorithms.bkz import pump_n_jump_bkz_tour as bkz
@@ -19,51 +20,32 @@ from datetime import datetime
 
 # Matzov - column notation, g6k - row notation 
 
-n = 55
-m = 40
-q = 1489
-p = 5
-
-k_enum = 4
-k_fft = 4
-k_lat = n - k_enum - k_fft
-
-Beta1 = 35
-Beta2 = 45
-D = 129
-
+n = None
+m = None
+q = None
+p = None
+k_enum = None
+k_fft = None
+k_lat = None
+# attack parameters
+Beta1 = None
+Beta2 = None
+D = None
+C = None
 # sieving parameters
-saturation_radius = 1.33
-saturation_ratio = 0.95
-db_size_factor = 5
-'''
-n = 30
-m = 30
-q = 1489
-p = 5
+saturation_radius = None
+saturation_ratio = None
+db_size_factor = None
 
-k_enum = 2
-k_fft = 2
-k_lat = n - k_enum - k_fft
-
-Beta1 = 25
-Beta2 = 25
-D = 33
-'''
-threads = max(1, multiprocessing.cpu_count())
-print(f"Threads: {threads}")
 LWEalpha = 0.015
 #sigma = q * LWEalpha
-
 max_sieving = 20
 
-eta = 2
-probabilities_B2 = {0: 0.375, 1: 0.25, -1: 0.25, 2: 0.0625, -2: 0.0625}
-probabilities_B3 = {0: 0.3125, 1: 0.234375, -1: 0.234375, 2: 0.09375, -2: 0.09375, 3: 0.015625, -3: 0.015625}
-entropy_B2 = 2.03 #sigma = 1.0
-entropy_B3 = 2.33 #sigma = 1.22
-
 # variables used for plotting
+dist = None
+current_date = None
+folder_path = None
+l_lengths = None
 l_lengths = []
 l_avgs = []
 current_date = None
@@ -96,30 +78,6 @@ def print_memory_usage():
     memory_mb = usage.ru_maxrss / 1024  # 1 KB = 1024 B
     print("Memory usage (MB):", memory_mb)
 
-def asympthotic_D(l_avgs):
-    sigma = 1
-    mi_values = np.arange(0.05, 1, 0.05)
-    D_estimates = []
-    for l_avg in range(len(l_avgs)):
-        D_estimate = []
-        for mi in mi_values:
-            D_est = (k_enum * entropy_B2 + k_fft * log(p) + log(1./mi)) * \
-                exp((k_fft / 3) * pow((sigma * pi) / p, 2)) * \
-                exp((4 * pow(((l_avg * sigma * pi) / q),2)))   
-            D_estimate.append(D_est)
-        D_estimates.append(D_estimate)
-
-    D_estimates = np.mean(D_estimates, axis=0)
-
-    plt.figure(figsize=(10, 6))  # Set the figure size
-    plt.plot(mi_values, D_estimates, marker='o')
-    plt.title(f'Estimated required number of samples by probability of failure\n(Average form all trials)')
-    plt.xlabel('Probability of failure (mi)')
-    plt.ylabel('Estimated required number of samples (D)')
-    plt.xticks(mi_values) 
-    plt.grid(True)
-    plt.savefig(folder_path + f"D_estimate_{n}_{m}_{q}" + '.png')
-
 def entropy(probabilities):
     """
     Calculate the entropy value based on the given probabilities.
@@ -140,25 +98,73 @@ def entropy(probabilities):
 def vector_length(vector):
     return sqrt(sum(v_**2 for v_ in vector))
 
-def binomial(eta):
+def asympthotic_D(l_avgs):
     """
-    Compute the Binomial function.
+    Calculate the asymptotic bound on the required number of samples
+    based on the parameters for the algorithm.
 
     Parameters:
-    - eta (int): Number of iterations.
+    l_avgs (list): List of average size of vectors.
 
     Returns:
-    - int: The result of the Binomial function.
+    None
+
     """
-    sum_result = 0
+    mi_values = np.arange(0.05, 1, 0.05)
+    D_estimates = []
+    for l_avg in range(len(l_avgs)):
+        D_estimate = []
+        D_eq_tilde = exp((4 * pow(((l_avg * dist.sigma * pi) / q),2)))
+        D_round_tilde = exp((k_fft / 3) * pow((dist.sigma * pi) / p, 2)) 
+        for mi in mi_values:
+            D_fpfn_tilde = (k_enum * dist.entropy + k_fft * log(p) + log(1./mi))          
+            D_estimate.append(D_eq_tilde * D_round_tilde* D_fpfn_tilde )
 
-    for i in range(eta):
-        a = randint(0, 1)
-        b = randint(0, 1)
-        sum_result += a - b
+        D_estimates.append(D_estimate)
 
-    return sum_result
+    D_estimates = np.mean(D_estimates, axis=0)
 
+    plt.figure(figsize=(10, 6))  # Set the figure size
+    plt.plot(mi_values, D_estimates, marker='o')
+    plt.title(f'Estimated required number of samples by probability of failure\n(Average form all trials)')
+    plt.xlabel('Probability of failure (mi)')
+    plt.ylabel('Estimated required number of samples (D)')
+    plt.xticks(mi_values) 
+    plt.grid(True)
+    plt.savefig(folder_path + f"D_estimate_{n}_{m}_{q}" + '.png')
+
+class BinomialDistribution():
+
+    def __init__(self, eta):
+        if eta == 2:
+            self.probability_distribution = {0: 0.375, 1: 0.25, -1: 0.25, 2: 0.0625, -2: 0.0625}
+            self.entropy = 2.03
+            self.sigma = 1.0
+            self.eta = eta
+        elif eta == 3:
+            self.probability_distribution = {0: 0.3125, 1: 0.234375, -1: 0.234375, 2: 0.09375, -2: 0.09375, 3: 0.015625, -3: 0.015625}
+            self.entropy = 2.33
+            self.sigma = 1.22
+            self.eta = eta
+
+    def __call__(self):
+        """
+        Compute the Binomial function.
+
+        Parameters:
+        - eta (int): Number of iterations.
+
+        Returns:
+        - int: The result of the Binomial function.
+        """
+        sum_result = 0
+
+        for _ in range(eta):
+            a = randint(0, 1)
+            b = randint(0, 1)
+            sum_result += a - b
+
+        return sum_result
 
 class DiscreteGaussian:
     """
@@ -231,6 +237,16 @@ class DiscreteGaussian:
         return self.tail * (-1)**randint(0, 1)
 
 def progressive_sieve_left(g6k):
+    """
+    Perform a progressive sieving with extend_left() function
+
+    Parameters:
+    g6k (Siever): g6k instance used for sieving
+
+    Returns:
+    database (list): List containing .5 * saturation_ratio *saturation_radius**(Beta2/2.) shortest vectors.
+
+    """
     r = g6k.r
     g6k.initialize_local(0, max(0, r - 20), r)
     while g6k.r - g6k.l < min(Beta2, 45):
@@ -318,31 +334,20 @@ def progressive_BKZ(g6k):
 
     return g6k
 
-def generate_permutations(eta, n):
+def generate_permutations(n):
     """
     Generate permutations of numbers based on the value of eta and the length of the permutation.
 
     Parameters:
-        eta (int): Parameter determining the set of numbers used for permutations.
-                   If eta equals 2, numbers range from -2 to 2. Otherwise, numbers range from -3 to 3.
+
         n (int): Length of each permutation.
 
     Returns:
         numpy.ndarray: An array containing all possible permutations of numbers with their respective probabilities,
                        sorted in descending order of probability sums.
-
-    Description:
-        This function generates permutations of numbers with repetition based on the value of eta and the length of
-        each permutation. It computes the probability sum for each permutation and sorts them in descending order
-        based on the probability sum. Finally, it returns an array containing all permutations sorted by their
-        probability sums.
     """
-    if eta == 2:
-        numbers = [-2, -1, 0, 1, 2]
-        probabilities = probabilities_B2
-    else:
-        numbers = [-3, -2, -1, 0, 1, 2, 3]
-        probabilities = probabilities_B3
+    numbers = dist.probability_distribution.keys()
+    probabilities = dist.probability_distribution
 
     # Generate all possible combinations of numbers with repetition
     all_combinations = product(numbers, repeat=n)
@@ -411,10 +416,10 @@ def generate_LWE_instance(m, n, q):
     e = list()
 
     for _ in range(n):
-        s.append(binomial(eta))
+        s.append(dist())
 
     for _ in range(m):    
-        e.append(binomial(eta))
+        e.append(dist())
 
     b = A.multiply_left(s) # return s * A
     b = [(b[i] + e[i]) % q for i in range(m)]
@@ -489,10 +494,9 @@ def dual_attack_test(A, b, s):
     #Line 3 : 
     start_time = time.time()
     L = sampling(B_dual)
-    L = L[:D]
     end_time = time.time()
     execution_time = end_time - start_time
-    print("Execution time:", execution_time, "seconds")
+    print("Execution time of sieving:", execution_time, "seconds")
     logging.info(f"Sampling completed, execution time: {execution_time}")
 
     d = len(L)
@@ -504,19 +508,17 @@ def dual_attack_test(A, b, s):
         y_ffts.append(tuple(element % q for element in A_fft.multiply_left(v)))       
         y_enums.append(tuple(element % q for element in A_enum.multiply_left(v)))
         
-    new_k_enum = k_enum
     # Line 4:
-    s_tilde_enums = generate_permutations(eta, new_k_enum)
+    s_tilde_enums = generate_permutations(k_enum)
     for exponent in range(0, int(log2(d))):
         power_of_two = 2 ** (exponent + 1)
-        
         probs = []
         for i in range(len(s_tilde_enums)):
             _max = mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft, L[:power_of_two], s_tilde_enums[i], b)
             probs.append((_max, s_tilde_enums[i]))
             #list_max.append(_max)
         # get the rank
-        matching_tuple = next(item for item in probs if np.array_equal(item[1], s[:new_k_enum]))
+        matching_tuple = next(item for item in probs if np.array_equal(item[1], s[:k_enum]))
         # Posortowana tablica po pierwszej wartości w każdej tupli
         sorted_array = sorted(probs , key=lambda x: x[0])
         index2 = sorted_array.index(matching_tuple)
@@ -527,17 +529,55 @@ def dual_attack_test(A, b, s):
         print("guess: ")
         print(sorted_array[index][1])
         print("correct: ")
-        print(s[:new_k_enum])
+        print(s[:k_enum])
         logging.info(f"Rank for exponent {exponent} : {abs(index2 - index)}")
         correct[exponent] = abs(index2 - index)
 
     return correct
 
+def parse_parametrs():
+    # Creating an ArgumentParser object to handle command-line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-n', type=int, default=40)
+    parser.add_argument('-m', type=int, default=30)
+    parser.add_argument('--kenum', type=int, default=4)
+    parser.add_argument('--kfft', type=int, default=4)
+    parser.add_argument('-q', type=int, default=3329)
+    parser.add_argument('-p', type=int, default=5)
+    parser.add_argument('--eta', type=int, default=2)
 
-def test_vectors():
-    global current_date 
-    global folder_path
-    global l_lengths 
+    parser.add_argument('--Beta1', type=int, default=30)
+    parser.add_argument('--Beta2', type=int, default=30)
+    parser.add_argument('-D', type=int, default=129)
+
+    parser.add_argument('--saturation_radius', type=int, default=1.33)
+    parser.add_argument('--saturation_ratio', type=int, default=0.95)
+    parser.add_argument('--db_size_factor', type=int, default=10)
+    # Parsing the command-line arguments and storing them in 'args' object
+    args = parser.parse_args()
+    # Assigning the parsed values to global variables for further use
+    global n, m, k_enum, k_fft, q, p, eta, Beta1, Beta2, D, saturation_radius, saturation_ratio, db_size_factor
+
+    n = args.n
+    m = args.m
+    k_enum = args.kenum
+    k_fft = args.kfft
+    q = args.q
+    p = args.p
+    eta = args.eta
+    Beta1 = args.Beta1
+    Beta2 = args.Beta2
+    D = args.D
+    saturation_radius = args.saturation_radius
+    saturation_ratio = args.saturation_ratio
+    db_size_factor = args.db_size_factor
+
+if __name__ == '__main__':
+
+    parse_parametrs()
+
+    threads = max(1, multiprocessing.cpu_count())
+    print(f"Threads: {threads}")
 
     # Creating folder for storing the results
     current_date = datetime.now().strftime("%m-%d-%H-%M")
@@ -545,19 +585,18 @@ def test_vectors():
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
-    # Creating logging file
+    # Creating a logging file
     log_name = folder_path + "_logs.txt"
     logging.basicConfig(filename=log_name, level=logging.INFO,
                         format='%(asctime)s: %(message)s', datefmt='%m-%d %H:%M:%S')
 
-    assert k_enum + k_fft + k_lat == n
-
+    k_lat = n - k_enum - k_fft
+    dist = BinomialDistribution(eta)
     A, b, s = generate_LWE_instance(m, n, q)
 
     variables['A'] = A
     variables['b'] = b
     variables['s'] = s
-
     file_name = f"variables_{n}_{m}.txt"
 
     # Create the file containg the LWE instance and all the variables
@@ -606,5 +645,3 @@ def test_vectors():
     plt.xticks(x_values, x_labels)
     plt.grid(True)
     plt.savefig(folder_path + plot_name + '.png')
-
-test_vectors()
