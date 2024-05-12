@@ -6,6 +6,8 @@ import os
 import multiprocessing
 import resource
 import argparse
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor
 from random import randint, random
 from math import sqrt, ceil, pi, sin, cos, exp, log, log2
 from g6k import Siever, SieverParams
@@ -273,7 +275,14 @@ def progressive_sieve_left(g6k):
 
     g6k.resize_db(ceil(.5 * saturation_ratio *saturation_radius**(Beta2/2.)))
     db = list(g6k.itervalues())
-    database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
+    #database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
+    database = [None] * len(db)
+    multiply_left_partial = partial(multiply_left, A = g6k.M.B[g6k.l:g6k.r])
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # Wykonanie funkcji multiply_left(v) na każdym elemencie z L i wypełnienie tablicy y_fft
+        for i, result in zip(range(len(db)), executor.map(multiply_left_partial, db)):
+            database[i] = result
+
     print(f"Final database size: {len(database)}")
     logging.info(f"Final database size:: {len(database)}")
 
@@ -477,6 +486,9 @@ def sampling(B_dual):
     logging.info(f"Average lengh l: {sum(l_length) / len(l_length)}")
     return short_vectors
 
+def multiply_left(v, A):
+    return A.multiply_left(v)
+
 def dual_attack_test(A, b, s):
 
     #Line 1: 
@@ -501,13 +513,18 @@ def dual_attack_test(A, b, s):
 
     d = len(L)
     correct = [0] * int(log2(d))
-    y_ffts = []
-    y_enums = []
-    for i in range(0, d):
-        v = L[i]
-        y_ffts.append(tuple(element % q for element in A_fft.multiply_left(v)))       
-        y_enums.append(tuple(element % q for element in A_enum.multiply_left(v)))
-        
+
+    y_ffts = [None] * d
+    y_enums = [None] * d
+    multiply_left_fft = partial(multiply_left, A = A_fft)
+    multiply_left_enum = partial(multiply_left, A = A_enum)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # Wykonanie funkcji multiply_left(v) na każdym elemencie z L i wypełnienie tablicy y_fft
+        for i, result in zip(range(len(L)), executor.map(multiply_left_fft, L)):
+            y_ffts[i] = result
+        for i, result in zip(range(len(L)), executor.map(multiply_left_enum, L)):
+            y_enums[i] = result
+
     # Line 4:
     s_tilde_enums = generate_permutations(k_enum)
     for exponent in range(0, int(log2(d))):
@@ -538,16 +555,16 @@ def dual_attack_test(A, b, s):
 def parse_parametrs():
     # Creating an ArgumentParser object to handle command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('-n', type=int, default=40)
-    parser.add_argument('-m', type=int, default=30)
+    parser.add_argument('-n', type=int, default=80)
+    parser.add_argument('-m', type=int, default=70)
     parser.add_argument('--kenum', type=int, default=4)
     parser.add_argument('--kfft', type=int, default=4)
     parser.add_argument('-q', type=int, default=3329)
     parser.add_argument('-p', type=int, default=5)
     parser.add_argument('--eta', type=int, default=2)
 
-    parser.add_argument('--Beta1', type=int, default=30)
-    parser.add_argument('--Beta2', type=int, default=30)
+    parser.add_argument('--Beta1', type=int, default=55)
+    parser.add_argument('--Beta2', type=int, default=55)
     parser.add_argument('-D', type=int, default=129)
 
     parser.add_argument('--saturation_radius', type=int, default=1.33)
