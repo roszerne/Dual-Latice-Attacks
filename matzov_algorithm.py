@@ -6,10 +6,11 @@ import os
 import multiprocessing
 import resource
 import argparse
+from scipy.stats import binom
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from random import randint, random
-from math import sqrt, ceil, pi, sin, cos, exp, log, log2
+from math import sqrt, ceil, pi, sin, cos, exp, log, log2, comb, prod
 from g6k import Siever, SieverParams
 from g6k.algorithms.bkz import pump_n_jump_bkz_tour as bkz
 from g6k.utils.stats import dummy_tracer
@@ -38,20 +39,17 @@ C = None
 saturation_radius = None
 saturation_ratio = None
 db_size_factor = None
-
-LWEalpha = 0.015
-#sigma = q * LWEalpha
 max_sieving = 20
+dist = None 
 
 # variables used for plotting
-dist = None
-current_date = None
-folder_path = None
-l_lengths = None
-l_lengths = []
-l_avgs = []
-current_date = None
-folder_path = None
+l_lengths = [] # List of size num_of_trials x D, containing lengths of vectors for each trial
+l_avgs = [] # List of size num_of_trials, containing average size of D vectors for each trial 
+current_date = None # Current date used for creating folder name 
+folder_path = None # Path where the result of experiments are stored
+sub_trials = None
+mi_values = np.arange(0.05, 1, 0.05)
+mi = 0.01
 variables = {
     'n': n,
     'm': m,
@@ -100,31 +98,51 @@ def entropy(probabilities):
 def vector_length(vector):
     return sqrt(sum(v_**2 for v_ in vector))
 
-def asympthotic_D(l_avgs):
+def required_number_of_samples(secret, error, l_avg):
+    # assuming alpha = 1, since both error and secret are from the same distribution
+    tau = ((np.inner(error, error) + np.inner(secret[-k_lat:], secret[-k_lat:])) / (m + k_lat)) * l_avg
+    D_eq = exp(4 * pow(((pi * tau)/ q), 2))
+    D_round = pow(prod((sin(pi * s / p) / (pi * s / p)) for s in secret[k_enum:k_enum + k_fft] if pow(s, 1, p) != 0), -2)
+    D_arg = 0.5 + exp(-8 * pow(((pi * tau) / q), 2))
+    phi_fp = dist.CDF_INV((1 - mi / (2 * dist.n_enum(secret[:k_enum]) * pow(p, k_fft))))
+    phi_fn = dist.CDF_INV(1 - mi / 2)
+    D_fpfn = pow((phi_fp + phi_fn), 2)
+    D_estimates = D_eq + D_round + D_arg + D_fpfn 
+    C_estimates = phi_fp * sqrt(D_arg + D)
+    print(f"D (Concrete): {D_estimates}")
+    print(f"C (Concrete): {C_estimates}")
+    
+def parameters_of_advantage(l_avg):
+    D_estimates = []
+    C_estimates = []
+    D_eq_tilde = exp(4 * pow(((pi * dist.sigma * l_avg) / q), 2))
+    phi_fp = dist.CDF_INV((1 - mi / (2 * pow(2, k_enum * dist.entropy) * pow(p, k_fft))))
+    phi_fn = dist.CDF_INV(1 - mi / 2)
+    D_fpfn_tilde = pow((phi_fp + phi_fn), 2)
+    D_round_tilde = prod((sin(pi * s / p) / (pi * s / p)) ** (2 * k_fft * dist.probability_distribution[s]) for s in dist.probability_distribution.keys() if pow(s, 1, p) != 0)
+    D_est = D_eq_tilde + D_round_tilde + D_fpfn_tilde + 1 / 2
+    D_estimates.append(D_est)
+    C_estimates.append(phi_fp * sqrt(1/2 * D_est))
+    print(f"D: {D_estimates}")
+    print(f"C: {C_estimates}")
+
+def asympthotic_D(l_avg):
     """
     Calculate the asymptotic bound on the required number of samples
     based on the parameters for the algorithm.
 
-    Parameters:
-    l_avgs (list): List of average size of vectors.
+    Parameters: l_avgs (float): Average length of short vector returned by the sampling algorithm
 
     Returns:
     None
 
     """
-    mi_values = np.arange(0.05, 1, 0.05)
     D_estimates = []
-    for l_avg in range(len(l_avgs)):
-        D_estimate = []
-        D_eq_tilde = exp((4 * pow(((l_avg * dist.sigma * pi) / q),2)))
-        D_round_tilde = exp((k_fft / 3) * pow((dist.sigma * pi) / p, 2)) 
-        for mi in mi_values:
-            D_fpfn_tilde = (k_enum * dist.entropy + k_fft * log(p) + log(1./mi))          
-            D_estimate.append(D_eq_tilde * D_round_tilde* D_fpfn_tilde )
-
-        D_estimates.append(D_estimate)
-
-    D_estimates = np.mean(D_estimates, axis=0)
+    D_eq_tilde = exp((4 * pow(((l_avg * dist.sigma * pi) / q),2)))
+    D_round_tilde = exp((k_fft / 3) * pow((dist.sigma * pi) / p, 2)) 
+    for mi in mi_values:
+        D_fpfn_tilde = (k_enum * dist.entropy + k_fft * log(p) + log(1./mi))          
+        D_estimates.append(D_eq_tilde * D_round_tilde* D_fpfn_tilde)
 
     plt.figure(figsize=(10, 6))  # Set the figure size
     plt.plot(mi_values, D_estimates, marker='o')
@@ -136,7 +154,7 @@ def asympthotic_D(l_avgs):
     plt.savefig(folder_path + f"D_estimate_{n}_{m}_{q}" + '.png')
 
 class BinomialDistribution():
-
+#   (n, p) = (2*eta, 0.5)
     def __init__(self, eta):
         if eta == 2:
             self.probability_distribution = {0: 0.375, 1: 0.25, -1: 0.25, 2: 0.0625, -2: 0.0625}
@@ -148,6 +166,67 @@ class BinomialDistribution():
             self.entropy = 2.33
             self.sigma = 1.22
             self.eta = eta
+
+    def PDF(self, outcome):
+        return 0.25**(self.eta) * comb(2*self.eta, outcome + self.eta)
+
+    def CDF(self, x):
+        return binom.cdf(x, 2 * eta, 0.5)
+
+    def CDF_INV(self, quantile):
+        #initial_guess = eta / 2
+        initial_guess = 0
+        cdf_value = binom.cdf(initial_guess, 2 * eta, 0.5)
+        while cdf_value < quantile:
+            initial_guess += 1
+            cdf_value = binom.cdf(initial_guess, 2 * eta, 0.5)
+        return initial_guess
+
+    def generate_permutations(self, n):
+        """
+        Generate permutations of numbers with descending order of probability based on the value of eta and the length of the permutation.
+
+        Parameters:
+
+            n (int): Length of each permutation.
+
+        Returns:
+            numpy.ndarray: An array containing all possible permutations of numbers with their respective probabilities,
+                        sorted in descending order of probability sums.
+        """
+        numbers = self.probability_distribution.keys()
+        probabilities = self.probability_distribution
+
+        # Generate all possible combinations of numbers with repetition
+        all_combinations = product(numbers, repeat=n)
+
+        # Create a list of tuples where each tuple contains the combination and its probability sum
+        lists_with_probabilities = []
+        for combination in all_combinations:
+            probability_sum = np.sum([probabilities[num] for num in combination])
+            lists_with_probabilities.append((combination, probability_sum))
+
+        # Sort the lists based on the probability sum
+        sorted_lists = sorted(lists_with_probabilities, key=lambda x: x[1], reverse=True)
+
+        # Extract the combinations from the sorted list
+        combinations = [list_with_prob[0] for list_with_prob in sorted_lists]
+
+        # Create a NumPy array from the combinations
+        return np.array(combinations)
+
+    def n_enum(self, s):
+        """
+        Find the number of guesses s_enum_tilde with probabilities larger than the probability of correct s_enum, according to the distribution.
+
+        Parameters:
+            s (list): Secret Vector
+
+        Returns:
+            n_enum (int): the number of guesses with probabilities larger than the probability of correct s_enum.
+        """
+        permutations = self.generate_permutations(len(s))
+        return np.where((permutations == s).all(axis=1))[0][0]
 
     def __call__(self):
         """
@@ -268,13 +347,18 @@ def progressive_sieve_left(g6k):
     logging.info("hk3 sieving with size")
     with g6k.temp_params(saturation_ratio = saturation_ratio, saturation_radius = saturation_radius, db_size_base=sqrt(saturation_radius) ,db_size_factor = db_size_factor):
         g6k(alg="hk3")
-
+    
+    print("Finished hk3")
     while g6k.l > 0:
+        print_memory_usage()
         # Extend the lift context to the left
         g6k.extend_left(1)
-
+        print(f"Extending: {g6k.l}")
+    print("Finished extending")
     g6k.resize_db(ceil(.5 * saturation_ratio *saturation_radius**(Beta2/2.)))
+    print("Finished resizing")
     db = list(g6k.itervalues())
+    print("Finished listing")
     #database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
     database = [None] * len(db)
     multiply_left_partial = partial(multiply_left, A = g6k.M.B[g6k.l:g6k.r])
@@ -343,39 +427,6 @@ def progressive_BKZ(g6k):
 
     return g6k
 
-def generate_permutations(n):
-    """
-    Generate permutations of numbers based on the value of eta and the length of the permutation.
-
-    Parameters:
-
-        n (int): Length of each permutation.
-
-    Returns:
-        numpy.ndarray: An array containing all possible permutations of numbers with their respective probabilities,
-                       sorted in descending order of probability sums.
-    """
-    numbers = dist.probability_distribution.keys()
-    probabilities = dist.probability_distribution
-
-    # Generate all possible combinations of numbers with repetition
-    all_combinations = product(numbers, repeat=n)
-
-    # Create a list of tuples where each tuple contains the combination and its probability sum
-    lists_with_probabilities = []
-    for combination in all_combinations:
-        probability_sum = np.sum([probabilities[num] for num in combination])
-        lists_with_probabilities.append((combination, probability_sum))
-
-    # Sort the lists based on the probability sum
-    sorted_lists = sorted(lists_with_probabilities, key=lambda x: x[1], reverse=True)
-
-    # Extract the combinations from the sorted list
-    combinations = [list_with_prob[0] for list_with_prob in sorted_lists]
-
-    # Create a NumPy array from the combinations
-    return np.array(combinations)
-
 def mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft,  L, s_tilde_enum, b):
 
     table = np.zeros(shape=(p,) * k_fft, dtype=complex)
@@ -433,7 +484,7 @@ def generate_LWE_instance(m, n, q):
     b = A.multiply_left(s) # return s * A
     b = [(b[i] + e[i]) % q for i in range(m)]
 
-    return A, b, s
+    return A, b, s, e
 
 def create_dual_lattice(A_lat):
     """
@@ -461,27 +512,31 @@ def sampling(B_dual):
 
     sieverParams = SieverParams(threads = threads, dual_mode = False)
     g6k = Siever(M = B_dual, params=sieverParams)
-    short_vectors = []
-    l_length = []
+    short_vectors = [] # List of unique short vectors obtained in each iteration
+    l_length = [] # Length of short Vectors
+
     for _ in range(max_sieving):
-        bkz(g6k, dummy_tracer, Beta1) # BKZ reduction with block size Beta1'''   
+        logging.info(f"Begging BKZ reduction")
+        bkz(g6k, dummy_tracer, Beta1) # BKZ reduction with block size Beta1  
         logging.info(f"BKZ reduction completed")
         new_short_vectors = progressive_sieve_left(g6k)
+        # We only want unique short vectors
         for vector in new_short_vectors:
             if vector not in short_vectors:
                 short_vectors.append(vector)
         logging.info(f"New vectors sampled, number of vectors: {len(short_vectors)}")
+        # Check whether we have enough vectors
         if len(short_vectors) >= D:
             short_vectors = sorted(short_vectors, key=lambda x: vector_length(x))
             short_vectors = short_vectors[:D]
             l_length = [vector_length(vector) for vector in short_vectors]
             break
+
     l_lengths.append(l_length)
-    print(l_lengths)
     l_avgs.append(sum(l_length) / len(l_length))
+    
     print("Final DB size: ")
     print(len(short_vectors))
-    print(f"Average lengh l: {sum(l_length) / len(l_length)}")
     logging.info(f"Vectors used\n: {short_vectors}")
     logging.info(f"Average lengh l: {sum(l_length) / len(l_length)}")
     return short_vectors
@@ -512,7 +567,7 @@ def dual_attack_test(A, b, s):
     logging.info(f"Sampling completed, execution time: {execution_time}")
 
     d = len(L)
-    correct = [0] * int(log2(d))
+    correct = [0] * sub_trials
 
     y_ffts = [None] * d
     y_enums = [None] * d
@@ -526,8 +581,8 @@ def dual_attack_test(A, b, s):
             y_enums[i] = result
 
     # Line 4:
-    s_tilde_enums = generate_permutations(k_enum)
-    for exponent in range(0, int(log2(d))):
+    s_tilde_enums = dist.generate_permutations(k_enum)
+    for exponent in range(1, sub_trials + 1):
         power_of_two = 2 ** (exponent + 1)
         probs = []
         for i in range(len(s_tilde_enums)):
@@ -538,6 +593,7 @@ def dual_attack_test(A, b, s):
         matching_tuple = next(item for item in probs if np.array_equal(item[1], s[:k_enum]))
         # Posortowana tablica po pierwszej wartości w każdej tupli
         sorted_array = sorted(probs , key=lambda x: x[0])
+        
         index2 = sorted_array.index(matching_tuple)
         index = len(sorted_array) - 1
 
@@ -547,25 +603,27 @@ def dual_attack_test(A, b, s):
         print(sorted_array[index][1])
         print("correct: ")
         print(s[:k_enum])
+        print(len(sorted_array))
+        print(sorted_array[-len(sorted_array) // 2:])
         logging.info(f"Rank for exponent {exponent} : {abs(index2 - index)}")
-        correct[exponent] = abs(index2 - index)
+        correct[exponent - 1] = abs(index2 - index)
 
     return correct
 
 def parse_parametrs():
     # Creating an ArgumentParser object to handle command-line arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('-n', type=int, default=80)
-    parser.add_argument('-m', type=int, default=70)
+    parser.add_argument('-n', type=int, default=35)
+    parser.add_argument('-m', type=int, default=30)
     parser.add_argument('--kenum', type=int, default=4)
     parser.add_argument('--kfft', type=int, default=4)
     parser.add_argument('-q', type=int, default=3329)
     parser.add_argument('-p', type=int, default=5)
     parser.add_argument('--eta', type=int, default=2)
 
-    parser.add_argument('--Beta1', type=int, default=55)
-    parser.add_argument('--Beta2', type=int, default=55)
-    parser.add_argument('-D', type=int, default=129)
+    parser.add_argument('--Beta1', type=int, default=30)
+    parser.add_argument('--Beta2', type=int, default=30)
+    parser.add_argument('-D', type=int, default=64)
 
     parser.add_argument('--saturation_radius', type=int, default=1.33)
     parser.add_argument('--saturation_ratio', type=int, default=0.95)
@@ -609,7 +667,7 @@ if __name__ == '__main__':
 
     k_lat = n - k_enum - k_fft
     dist = BinomialDistribution(eta)
-    A, b, s = generate_LWE_instance(m, n, q)
+    A, b, s, e = generate_LWE_instance(m, n, q)
 
     variables['A'] = A
     variables['b'] = b
@@ -623,6 +681,8 @@ if __name__ == '__main__':
             file.write(f'{variable}:{value}\n')
 
     num_of_trials = 1 # how many times the test should be repreated
+    sub_trials = int(log2(D)) # number of sub-trials in each trial
+    print(f"sub_trials: {sub_trials}")
     logging.info(f"Number of trials: {num_of_trials}")
 
     s_guess = [] # An array containg the ranks for each trial
@@ -631,12 +691,16 @@ if __name__ == '__main__':
 
     s_guess = np.mean(s_guess, axis=0)
     
-    asympthotic_D(l_avgs) # Calculate the Asymptotic Number of Samples required for the attack (D)
+    asympthotic_D(l_avgs[-1]) # Calculate the Asymptotic Number of Samples required for the attack (D)
+    parameters_of_advantage(l_avgs[-1])
+    required_number_of_samples(s, e, l_avgs[-1])
+
     # Create a boxplot containg the lengths of the vectors used in the attack (averaged)
     sums = [sum(column) for column in zip(*l_lengths)]
     averages = [sum_value / len(l_lengths) for sum_value in sums] 
-    ranges = [2**i for i in range(1, int(log2(len(averages))) + 1)] # Define the ranges for boxplot series
+    ranges = [2**i for i in range(1, sub_trials + 1)] # Define the ranges for boxplot series
     data = [averages[:r] for r in ranges]
+
     plt.figure(figsize=(10, 6))
     plt.boxplot(data)
     plt.xticks(np.arange(1, len(ranges) + 1), [f'2^{i + 1}' for i in range(len(ranges))])
