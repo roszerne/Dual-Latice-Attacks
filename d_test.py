@@ -689,7 +689,7 @@ if __name__ == '__main__':
 
     k_lat = n - k_enum - k_fft
     dist = BinomialDistribution(eta)
-    num_of_trials = 2 # how many times the test should be repreated
+    num_of_trials = 5 # how many times the test should be repreated
     sub_trials = int(log2(D)) # number of sub-trials in each trial
     print(f"sub_trials: {sub_trials}")
     logging.info(f"Number of trials: {num_of_trials}")
@@ -701,8 +701,6 @@ if __name__ == '__main__':
     s_guess = np.mean(s_guess, axis=0)
     
     asympthotic_D(l_exp[-1]) # Calculate the Asymptotic Number of Samples required for the attack (D)
-    #parameters_of_advantage(l_exp[-1])
-    #required_number_of_samples(s, e, l_exp[-1])
 
     # Create a boxplot containg the lengths of the vectors used in the attack (averaged)
     sums = [sum(column) for column in zip(*l_lengths)]
