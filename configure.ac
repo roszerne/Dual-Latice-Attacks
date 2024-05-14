@@ -150,9 +150,9 @@ fi
 #
 
 AC_ARG_WITH(max-sieving-dim,
-        AS_HELP_STRING([--with-max-sieving-dim@<:@=DIM@:>@], [maximum supported sieving dimension [default=128]]),
+        AS_HELP_STRING([--with-max-sieving-dim@<:@=DIM@:>@], [maximum supported sieving dimension [default=320]]),
         [max_sieving_dim=$withval],
-        [max_sieving_dim=128])
+        [max_sieving_dim=320])
 
 AC_DEFINE_UNQUOTED([MAX_SIEVING_DIM], $max_sieving_dim, [maximum supported sieving dimension])
 
