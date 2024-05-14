@@ -80,7 +80,7 @@ void show_cpu_stats();
 
 // Maximum dimension of the local blocks we sieve in.
 #ifndef MAX_SIEVING_DIM
-#define MAX_SIEVING_DIM 128
+#define MAX_SIEVING_DIM 320
 #endif
 
 #ifndef XPC_THRESHOLD
