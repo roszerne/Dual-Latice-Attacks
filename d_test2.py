@@ -9,8 +9,7 @@ import argparse
 import math
 from scipy.stats import binom, norm
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor
-from random import randint, random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import sqrt, ceil, pi, sin, cos, exp, log, log2, comb, prod
 from g6k import Siever, SieverParams
 from g6k.algorithms.bkz import pump_n_jump_bkz_tour as bkz
@@ -18,11 +17,9 @@ from g6k.utils.stats import dummy_tracer
 from fpylll import IntegerMatrix, BKZ
 from fpylll.util import gaussian_heuristic
 from fpylll.algorithms.bkz2 import BKZReduction
-from itertools import product
 from datetime import datetime
 from distributions import BinomialDistribution, DiscreteGaussian
 from utils import vector_length, print_memory_usage, multiply_left
-
 # Matzov - column notation, g6k - row notation 
 
 n = None
@@ -47,12 +44,12 @@ gauss = None
 
 # variables used for plotting
 l_lengths = [] # List of size num_of_trials x D, containing lengths of vectors for each trial
-l_exp = [] # List of size num_of_trials, containing average size of D vectors for each trial 
+l_exp = None# List of size num_of_trials, containing average size of D vectors for each trial 
 current_date = None # Current date used for creating folder name 
 folder_path = None # Path where the result of experiments are stored
 sub_trials = None
 mi_values = np.arange(0.01, 1, 0.01)
-mi = 0.01
+mi = 0.001
 variables = None
 
 '''
@@ -61,23 +58,6 @@ s: m x 1, e: 1 x n
 MATZOV (column notation): m x n, m - number of samples, n - number of coefficients
 s: 1 x n , e: m x 1
 '''
-
-def required_number_of_samples(secret, error, l_exp):
-    # assuming alpha = 1, since both error and secret are from the same distribution
-    tau = ((np.inner(error, error) + np.inner(secret[-k_lat:], secret[-k_lat:])) / (m + k_lat)) * l_exp
-    D_eq = exp(4 * pow(((pi * tau)/ q), 2))
-    D_round = pow(prod((sin(pi * s / p) / (pi * s / p)) for s in secret[k_enum:k_enum + k_fft] if pow(s, 1, p) != 0), -2)
-    D_arg = 0.5 + exp(-8 * pow(((pi * tau) / q), 2))
-    phi_fp = dist.CDF_INV((1 - mi / (2 * dist.n_enum(secret[:k_enum]) * pow(p, k_fft))))
-    phi_fn = dist.CDF_INV(1 - mi / 2)
-    D_fpfn = pow((phi_fp + phi_fn), 2)
-    D_estimate = D_eq + D_round + D_arg + D_fpfn 
-    C_estimate = phi_fp * sqrt(D_arg + D)
-    print(f"D (Concrete): {D_estimate}")
-    print(f"C (Concrete): {C_estimate}")
-    logging.info(f"D (Concrete): {D_estimate}")
-    return D_estimate, C_estimate
-    
 def asympthotic_D(l_exp):
     """
     Calculate the asymptotic bound on the required number of samples
@@ -101,6 +81,26 @@ def asympthotic_D(l_exp):
     logging.info(f"{D_estimates}")
     logging.info(f"{mi_values}")
     plt.savefig(folder_path + f"D_estimate_{n}_{m}_{q}" + '.png')
+
+
+def D_of_advantage(l_exp):
+    D_eq_tilde = exp(4 * pow(((pi * dist.sigma * l_exp) / q), 2))
+    phi_fp = dist.CDF_INV((1 - mi / (2 * pow(2, k_enum * dist.entropy) * pow(p, k_fft))))
+    phi_fn = dist.CDF_INV(1 - mi / 2)
+    D_fpfn_tilde = pow((phi_fp + phi_fn), 2)
+    D_round_tilde = prod((sin(pi * s / p) / (pi * s / p)) ** (-2 * k_fft * dist.probability_distribution[s]) for s in dist.probability_distribution.keys() if pow(s, 1, p) != 0)
+    D_est = D_eq_tilde + D_round_tilde + D_fpfn_tilde + (1 / 2)
+    print(f"Minimum D required: {D_est}")
+    logging.info(f"Minimum D required: {D_est}")
+    return ceil(D_est)
+
+def C_of_advantage(D):
+    phi_fp = dist.CDF_INV((1 - (mi / (2 * pow(2, k_enum * dist.entropy) * pow(p, k_fft)))))
+    print(f"Based on: {D}")
+    C_estimate = phi_fp * sqrt( (1/2) * D)
+    print(f"C for {mi} advantage: {C_estimate}")
+    logging.info(f"C for {mi} advantage: {C_estimate}")
+    return C_estimate
 
 def progressive_sieve_left(g6k):
     """
@@ -128,12 +128,11 @@ def progressive_sieve_left(g6k):
         print(f"BGJ1 sieving with size: {g6k.l}")
         logging.info(f"BGJ1 sieving with size: {g6k.l}")
     
-    print("hk3 sieving with size")
+    '''print("hk3 sieving with size")
     logging.info("hk3 sieving with size")
     with g6k.temp_params(saturation_ratio = saturation_ratio, saturation_radius = saturation_radius, db_size_base=sqrt(saturation_radius) ,db_size_factor = db_size_factor):
         g6k(alg="hk3")
-    
-    print("Finished hk3")
+    print("Finished hk3")'''
     g6k.resize_db(ceil(saturation_ratio * saturation_radius ** (Beta2/2.)))
     print("Finished resizing")
     while g6k.l > 0:
@@ -156,62 +155,6 @@ def progressive_sieve_left(g6k):
 
     return [w[:m] for w in database] + [[-x for x in w[:m]] for w in database]
 
-def progressive_sieve_right(g6k):
-
-    g6k.initialize_local(0, 0, 0)
-    
-    while g6k.r < min(Beta2, 45):
-        g6k.extend_right(1)
-        g6k("gauss")
-        g6k("gauss")
-        print(f"Gauss sieving with size: {g6k.r}")
-        logging.info(f"Gauss sieving with size: {g6k.r}")
-
-    while g6k.r < Beta2:
-        with g6k.temp_params(saturation_ratio = saturation_ratio, saturation_radius = saturation_radius, db_size_base=sqrt(saturation_radius), db_size_factor=db_size_factor):
-            g6k.extend_right(1)
-            g6k("bgj1")
-            print_memory_usage()
-            print(f"BGJ1 sieving with size: {g6k.r}")
-            logging.info(f"BGJ1 sieving with size: {g6k.r}")
-
-    g6k.resize_db(ceil(.5 * saturation_ratio *saturation_radius**(Beta2/2.)))
-
-    while g6k.r < m + k_lat:
-        g6k.extend_right(1)
-
-    db = list(g6k.itervalues())
-    database = [g6k.M.B[g6k.l:g6k.r].multiply_left(v) for v in db]
-    print(f"Final database size: {len(database)}")
-    logging.info(f"Final database size:: {len(database)}")
-
-    return [w[:m] for w in database] + [[-x for x in w[:m]] for w in database]
-
-def progressive_BKZ(g6k):
-    """
-    Original code obtained from: github.com/ludopulles/DoesDualSieveWork
-    File: MATZOV.py
-    Author: ludopulles
-    License: MIT 
-
-    Run progressive BKZ up to blocksize beta
-
-    :param B: the IntegerMatrix object on which to perform the lattice
-    reduction.  Note that this function changes B.
-    :param beta: blocksize up to which inclusive to perform progressive BKZ reduction.
-    :param params: The SieverParams with which to instantiate the g6k object.
-    :param verbose: boolean indicating whether or not to output progress of BKZ.
-
-    :returns: Siever object containing the reduced basis.
-    """
-    bkz = BKZReduction(g6k.M)
-
-    # Run BKZ up to blocksize `beta`:
-    for _beta in range(2, Beta1 + 1):
-        bkz(BKZ.Param(_beta, strategies=BKZ.DEFAULT_STRATEGY, max_loops=2))
-
-    return g6k
-
 def mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft,  L, s_tilde_enum, b):
 
     table = np.zeros(shape=(p,) * k_fft, dtype=complex)
@@ -225,7 +168,8 @@ def mod_switch_distinguisher(y_enums, y_ffts, q, p, k_fft,  L, s_tilde_enum, b):
     fft_output = np.fft.fftn(table).real
     return np.amax(fft_output)   
 
-def generate_LWE_instance(m, n, q):
+# row notation
+def generate_LWE_lattice(m, n, q):
     """
     Generate an LWE instance (A, b) and secret s
 
@@ -239,36 +183,9 @@ def generate_LWE_instance(m, n, q):
     - b (list): Target matrix of size 1 x m
     - s (list): Secret matrix of size 1 x n
     """
-    # Generate a random q-ary lattice
     B = IntegerMatrix.random(m + n, 'qary', k = m, q = q)
-    '''
-        print(IntegerMatrix.random(10, "qary", k=8, q=127))
-        [ 1 0  50  44   5   3  78   3  94  97 ]
-        [ 0 1  69  12 114  43 118  47  53   4 ]
-        [ 0 0 127   0   0   0   0   0   0   0 ]
-        [ 0 0   0 127   0   0   0   0   0   0 ]
-        [ 0 0   0   0 127   0   0   0   0   0 ]
-        [ 0 0   0   0   0 127   0   0   0   0 ]
-        [ 0 0   0   0   0   0 127   0   0   0 ]
-        [ 0 0   0   0   0   0   0 127   0   0 ]
-        [ 0 0   0   0   0   0   0   0 127   0 ]
-        [ 0 0   0   0   0   0   0   0   0 127 ]
-    '''
     A = B.submatrix(0, n, n, m + n)
-
-    s = list()
-    e = list()
-
-    for _ in range(n):
-        s.append(dist())
-
-    for _ in range(m):    
-        e.append(dist())
-
-    b = A.multiply_left(s) # return s * A
-    b = [(b[i] + e[i]) % q for i in range(m)]
-
-    return A, b, s, e
+    return A
 
 def create_dual_lattice(A_lat):
     """
@@ -292,16 +209,14 @@ def create_dual_lattice(A_lat):
     return B_dual
 
 def sampling(B_dual):
-    global l_lengths, sub_trials, D
+    global l_lengths, l_exp, D
 
     sieverParams = SieverParams(threads = threads, dual_mode = False)
     g6k = Siever(M = B_dual, params=sieverParams)
     short_vectors = [] # List of unique short vectors obtained in each iteration
     l_length = [] # Length of short Vectors
     D = ceil(saturation_ratio * saturation_radius ** (Beta2/2.))
-    print(f"D: {D}")
-    sub_trials = int(log2(D)) # number of sub-trials in each trial
-    for _ in range(max_sieving):
+    for i in range(max_sieving):
         logging.info(f"Begging BKZ reduction")
         bkz(g6k, dummy_tracer, Beta1) # BKZ reduction with block size Beta1  
         logging.info(f"BKZ reduction completed")
@@ -313,81 +228,34 @@ def sampling(B_dual):
         logging.info(f"New vectors sampled, number of vectors: {len(short_vectors)}")
         # Check whether we have enough vectors
         if len(short_vectors) >= D:
-            short_vectors = sorted(short_vectors, key=lambda x: vector_length(x))
             short_vectors = short_vectors[:D]
+            short_vectors = sorted(short_vectors, key=lambda x: vector_length(x))
             l_length = [vector_length(vector) for vector in short_vectors]
+            l_exp = max(l_length)
+            D_of_advantage(l_exp)
             break
 
     l_lengths.append(l_length)
-    l_exp.append(max(l_length))
     print("Final DB size: ")
     print(len(short_vectors))
     logging.info(f"Vectors used\n: {short_vectors}")
     logging.info(f"Average lengh l: {sum(l_length) / len(l_length)}")
     return short_vectors
 
-def dual_attack_test(subtrial):
+def dual_attack_test(A, L, y_ffts, y_enums):
+    s = list()
+    e = list()
 
-    A, b, s, e = generate_LWE_instance(m, n, q)
+    for _ in range(n):
+        s.append(dist())
 
-    variables = {
-        'n': n,
-        'm': m,
-        'q': q,
-        'p': p,
-        'k_enum': k_enum,
-        'k_fft': k_fft,
-        'k_lat': k_lat,
-        'Beta1': Beta1,
-        'Beta2': Beta2,
-        'eta': 2
-    }
+    for _ in range(m):    
+        e.append(dist())
 
-    variables['A'] = A
-    variables['b'] = b
-    variables['s'] = s
-    file_name = f"variables_{n}_{m}_{subtrial}.txt"
+    b = A.multiply_left(s) # return s * A
+    b = [(b[i] + e[i]) % q for i in range(m)]
 
-    # Create the file containg the LWE instance and all the variables
-    file_path = os.path.join(folder_path, file_name)
-    with open(file_path, 'w') as file:
-        for variable, value in variables.items():
-            file.write(f'{variable}:{value}\n')
-
-    #Line 1: 
-    A_enum = A[:k_enum]
-    A_fft = A[k_enum: k_enum + k_fft]
-    A_lat = A[k_enum + k_fft:]
-
-    A_enum.transpose()
-    A_fft.transpose()
-    A_lat.transpose()
-
-    #Line 2 : 
-    B_dual = create_dual_lattice(A_lat)
-    
-    #Line 3 : 
-    start_time = time.time()
-    L = sampling(B_dual)
-    end_time = time.time()
-    execution_time = end_time - start_time
-    print("Execution time of sieving:", execution_time, "seconds")
-    logging.info(f"Sampling completed, execution time: {execution_time}")
-
-    d = len(L)
     correct = [0] * sub_trials
-
-    y_ffts = [None] * d
-    y_enums = [None] * d
-    multiply_left_fft = partial(multiply_left, A = A_fft)
-    multiply_left_enum = partial(multiply_left, A = A_enum)
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        # Wykonanie funkcji multiply_left(v) na każdym elemencie z L i wypełnienie tablicy y_fft
-        for i, result in zip(range(len(L)), executor.map(multiply_left_fft, L)):
-            y_ffts[i] = result
-        for i, result in zip(range(len(L)), executor.map(multiply_left_enum, L)):
-            y_enums[i] = result
-
     # Line 4:
     print(f"Sub trials: {sub_trials}")
     s_tilde_enums = dist.generate_permutations(k_enum)
@@ -400,7 +268,6 @@ def dual_attack_test(subtrial):
             #list_max.append(_max)
         # get the rank
         matching_tuple = next(item for item in probs if np.array_equal(item[1], s[:k_enum]))
-        # Posortowana tablica po pierwszej wartości w każdej tupli
         sorted_array = sorted(probs , key=lambda x: x[0])
         
         index2 = sorted_array.index(matching_tuple)
@@ -412,8 +279,6 @@ def dual_attack_test(subtrial):
         print(sorted_array[index][1])
         print("correct: ")
         print(s[:k_enum])
-        #print(len(sorted_array))
-        #print(sorted_array[-len(sorted_array) // 2:])
         logging.info(f"Rank for exponent {exponent} : {abs(index2 - index)}")
         correct[exponent - 1] = abs(index2 - index)
 
@@ -428,12 +293,12 @@ def parse_parametrs():
     parser.add_argument('--kfft', type=int, default=4)
     parser.add_argument('-q', type=int, default=3329)
     parser.add_argument('-p', type=int, default=5)
-    parser.add_argument('--eta', type=int, default=2) # sigma for Gaussian distribution
+    parser.add_argument('--eta', type=int, default=1) # sigma for Gaussian distribution
 
     parser.add_argument('--Beta1', type=int, default=25)
     parser.add_argument('--Beta2', type=int, default=30)
-    parser.add_argument('-D', type=int, default=64)
-    parser.add_argument('-gauss', type=int, default=0) # 0 - Binomial distribution, 1 - Gaussian distribution
+    parser.add_argument('-D', type=int, default=32)
+    parser.add_argument('-gauss', type=int, default=1) # 0 - Binomial distribution, 1 - Gaussian distribution
 
     parser.add_argument('--saturation_radius', type=int, default=1.33)
     parser.add_argument('--saturation_ratio', type=int, default=0.95)
@@ -476,6 +341,27 @@ if __name__ == '__main__':
     logging.basicConfig(filename=log_name, level=logging.INFO,
                         format='%(asctime)s: %(message)s', datefmt='%m-%d %H:%M:%S')
 
+    variables = {
+        'n': n,
+        'm': m,
+        'q': q,
+        'p': p,
+        'k_enum': k_enum,
+        'k_fft': k_fft,
+        'k_lat': k_lat,
+        'Beta1': Beta1,
+        'Beta2': Beta2,
+        'eta': 2
+    }
+    
+    file_name = f"variables_{n}_{m}.txt"
+
+    # Create the file containg the LWE instance and all the variables
+    file_path = os.path.join(folder_path, file_name)
+    with open(file_path, 'w') as file:
+        for variable, value in variables.items():
+            file.write(f'{variable}:{value}\n')
+
     k_lat = n - k_enum - k_fft
     if gauss == 1:
         dist = DiscreteGaussian(eta)
@@ -484,18 +370,56 @@ if __name__ == '__main__':
         dist = BinomialDistribution(eta)
         logging.info(f"Binomial distribution with eta: {eta}")
 
-    num_of_trials = 2 # how many times the test should be repreated
+    A = generate_LWE_lattice(m, n, q)
+    variables['A'] = A
+
+    #Line 1: 
+    A_enum = A[:k_enum]
+    A_fft = A[k_enum: k_enum + k_fft]
+    A_lat = A[k_enum + k_fft:]
+
+    A_enum.transpose()
+    A_fft.transpose()
+    A_lat.transpose()
+
+    #Line 2 : 
+    B_dual = create_dual_lattice(A_lat)
+    
+    #Line 3 : 
+    start_time = time.time()
+    L = sampling(B_dual)
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print("Execution time of sieving:", execution_time, "seconds")
+    logging.info(f"Sampling completed, execution time: {execution_time}")
+    L = L[:32]
+    sub_trials = int(log2(len(L))) # number of sub-trials in each trial
+    #C = parameters_of_advantage(l_exp)
+    #required_number_of_samples(s, e, l_exp)
+    d = len(L)
+    y_ffts = [None] * d
+    y_enums = [None] * d
+    multiply_left_fft = partial(multiply_left, A = A_fft)
+    multiply_left_enum = partial(multiply_left, A = A_enum)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # Wykonanie funkcji multiply_left(v) na każdym elemencie z L i wypełnienie tablicy y_fft
+        for i, result in zip(range(len(L)), executor.map(multiply_left_fft, L)):
+            y_ffts[i] = result
+        for i, result in zip(range(len(L)), executor.map(multiply_left_enum, L)):
+            y_enums[i] = result
+
+    asympthotic_D(l_exp) # Calculate the Asymptotic Number of Samples required for the attack (D)
+
+    num_of_trials = 5 # how many times the test should be repreated
     logging.info(f"Number of trials: {num_of_trials}")
 
     s_guess = [] # An array containg the ranks for each trial
     for i in range (num_of_trials):
-        s_guess.append(dual_attack_test(i))
+        s_guess.append(dual_attack_test(A, L, y_ffts, y_enums))
 
+    logging.info(f"S guess: {s_guess}")
     s_guess = np.mean(s_guess, axis=0)
-    
-    asympthotic_D(l_exp[-1]) # Calculate the Asymptotic Number of Samples required for the attack (D)
-
-    # Create a boxplot containg the lengths of the vectors used in the attack (averaged)
+ # Create a boxplot containg the lengths of the vectors used in the attack (averaged)
     sums = [sum(column) for column in zip(*l_lengths)]
     averages = [sum_value / len(l_lengths) for sum_value in sums] 
     ranges = [2**i for i in range(1, sub_trials + 1)] # Define the ranges for boxplot series
