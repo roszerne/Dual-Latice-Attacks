@@ -1,4 +1,20 @@
-This repository contains the code and resources related to my master's thesis titled "Analysis and Implementation of Selected Attacks on Lattice-Based Cryptosystems." It is a fork of the original [General Sieve Kernel (G6K)](https://github.com/fplll/g6k/) repository. The fork was created to contribute modifications, improvements, or experiments without affecting the original project.
+Master's Thesis: Analysis and Implementation of Selected Attacks on Lattice-Based Cryptosystems
+================================================================================================
+
+This repository contains the code and resources related to my master's thesis titled **"Analysis and Implementation of Selected Attacks on Lattice-Based Cryptosystems."** It is a fork of the original `General Sieve Kernel (G6K) <https://github.com/fplll/g6k/>`_ repository. This fork was created to contribute modifications, improvements, and experiments without impacting the original project.
+
+Repository Structure
+---------------------
+
+- **d_matzov.py**: Contains the code for the experiments discussed in Chapter 5, Section 1.1. This script examines the asympthotic bound on the minimal required number of short vectors for the dual attack by MATZOV, given in Corollary 4.3.1.
+- **d_guo.py**: Contains the code for the experiments discussed in Chapter 5, Section 1.2. This script examines the bound on the minimal required number of short vectors for the dual attack by Guo and Johansson.
+- **score_distribution.py**: Contains the code for the experiments discussed in Chapter 5, Section 2. This script analyzes the distribution of correct scores returned by the dual attack by MATZOV.
+- **c_test.py**: Contains the code for the experiments discussed in Chapter 5, Section 3. This script estimates the Cutoff Value :math:`C` as a function of the secret for the dual attack by MATZOV.
+- **c_for_advantage.py**: Contains the code for the experiments discussed in Chapter 5, Section 4. This script estimates the Cutoff Value :math:`C` as a function of the secret distribution for the dual attack by MATZOV.
+- **distributions.py**: Implementations of centered binomial distribution and modular gaussian distributions.
+- **utils.py**: Additional utility functions.
+
+The remainder of this README provides instructions on how to set up and run the forked G6K library from this repository.
 
 ******************************
 The General Sieve Kernel (G6K)
