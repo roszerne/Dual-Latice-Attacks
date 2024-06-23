@@ -44,6 +44,8 @@ class BinomialDistribution():
         return binom.cdf(x, 2 * self.eta, 0.5)
 
     def CDF_INV(self, quantile):
+        if quantile >= 1:
+            quantile = 0.9999
         #initial_guess = eta / 2
         initial_guess = 0
         cdf_value = binom.cdf(initial_guess, 2 * self.eta, 0.5)
@@ -128,7 +130,7 @@ class DiscreteGaussian:
     given standard deviation
     """
 
-    def __init__(self, sigma, tau=3):
+    def __init__(self, sigma, tau=2):
         """
         Discrete Gaussian Sampler over the integers
 
@@ -181,14 +183,15 @@ class DiscreteGaussian:
         return (self.cdt[abs(outcome)] - self.cdt[abs(outcome) - 1]) / self.renorm
 
     def CDF_INV(self, p):
-
+        if p >= 1:
+            p = 0.99
         # Step 1: Convert probability to z-score using the standard normal distribution
         z_score = norm.ppf(p)
         
         # Step 2: Convert z-score to the original scale of the distribution
         x = 0 + self.sigma * z_score
         
-        return x
+        return np.real(x)
 
     def generate_permutations(self, n):
         """
@@ -254,3 +257,4 @@ class DiscreteGaussian:
                 return i * (-1)**randint(0, 1)
         # This should not happen:
         return self.tail * (-1)**randint(0, 1)
+    
